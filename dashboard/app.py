@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
 import os
 import random
 import time
@@ -17,7 +16,8 @@ from streamlit_autorefresh import st_autorefresh
 # ---------------------------------------------------------
 st.set_page_config(page_title="Supply Chain Command Center", page_icon="🚚", layout="wide")
 
-DB_FILE = "shipments.db"
+# PostgreSQL connection from environment variable
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://supply_chain_user:supply_chain_pass@postgres:5432/supply_chain_db")
 REFRESH_RATE = 10 
 
 st.markdown("""
@@ -96,19 +96,21 @@ def generate_mock_data():
 def fetch_live_telemetry():
     """Member 1: Connect your Pathway pipeline output here."""
     try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
+        # Use SQLAlchemy connection string directly with pandas
         query = """
         SELECT s.shipment_id, s.source, s.destination, s.source_lat, s.source_lon, s.dest_lat, s.dest_lon,
-               t.lat, t.lon, t.speed_kmph AS avg_speed, t.load_status
+               COALESCE(t.lat, s.source_lat) as lat, 
+               COALESCE(t.lon, s.source_lon) as lon, 
+               COALESCE(t.speed_kmph, 60.0) AS avg_speed, 
+               COALESCE(t.load_status, 'LOADED') as load_status
         FROM shipments s
         LEFT JOIN telemetry t ON s.shipment_id = t.shipment_id
         WHERE t.ts = (SELECT MAX(ts) FROM telemetry t2 WHERE t2.shipment_id = s.shipment_id) OR t.ts IS NULL;
         """
-        df = pd.read_sql(query, conn)
-        conn.close()
+        df = pd.read_sql(query, DATABASE_URL)
         return df if not df.empty else generate_mock_data()
-    except Exception:
+    except Exception as e:
+        st.warning(f"⚠️ Database connection failed: {e}. Using mock data for demo.")
         return generate_mock_data()
 
 def fetch_model_predictions(df):
@@ -116,9 +118,29 @@ def fetch_model_predictions(df):
     if df.empty: return df
     
     df['predicted_eta'] = [random.randint(45, 300) for _ in range(len(df))]
-    df['alert_level'] = [random.choice(['on_time', 'on_time', 'critical']) for _ in range(len(df))]
-    df['anomaly_reason'] = ["Sudden Speed Drop Detected" if a == 'critical' else "" for a in df['alert_level']]
+    df['alert_level'] = [random.choice(['on_time', 'warning', 'critical']) for _ in range(len(df))]
     df['temperature'] = [-18.5 if a != 'critical' else 4.2 for a in df['alert_level']]
+    
+    # NEW: Logic to determine the probable cause of an ETA delay
+    def calculate_delay_reason(row):
+        if row['alert_level'] == 'on_time':
+            return ""
+        
+        reasons = []
+        # Handle None values safely
+        avg_speed = row.get('avg_speed') or 60.0
+        temperature = row.get('temperature') or -18.5
+        
+        if avg_speed < 50:
+            reasons.append("Heavy traffic congestion or roadwork detected.")
+        if temperature > -5:
+            reasons.append("Mandatory halt required for cold-chain unit inspection.")
+        if row['alert_level'] == 'critical' and avg_speed >= 50:
+            reasons.append("Unexpected route deviation (+14 km) detected.")
+            
+        return " ".join(reasons) if reasons else "Minor weather disruptions."
+
+    df['delay_reason'] = df.apply(calculate_delay_reason, axis=1)
     
     return df
 
@@ -176,31 +198,34 @@ with tab_map:
             vehicle_layer = pdk.Layer("ScatterplotLayer", data=df, get_position='[lon, lat]', get_color=[18, 94, 110, 200], get_radius=25000, pickable=True)
             
             st.pydeck_chart(pdk.Deck(layers=[path_layer, vehicle_layer], initial_view_state=pdk.ViewState(latitude=21.0, longitude=78.0, zoom=3.5), tooltip={"html": "<b>ID: {shipment_id}</b><br>Speed: {avg_speed} km/h"}, map_style='light'), use_container_width=True)
-
-    # Smart Inspector (Anomaly UI)
+# Smart Inspector (Anomaly UI)
     with col_details:
         st.markdown("### 📦 AI Inspector")
         if not df.empty:
             sid = st.selectbox("Select Shipment ID", df['shipment_id'].unique(), label_visibility="collapsed")
             row = df[df['shipment_id'] == sid].iloc[0]
             
-            badge = "badge-critical" if row.get('alert_level') == 'critical' else "badge-ontime"
+            badge = "badge-critical" if row.get('alert_level') in ['warning', 'critical'] else "badge-ontime"
             temp_color = "var(--danger)" if row.get('temperature', 0) > -5 else "var(--teal-mid)"
             
-            # Anomaly UI Logic
+            # NEW: Anomaly & Delay UI Logic
             reason_html = ""
-            if row.get('anomaly_reason') and row.get('alert_level') == 'critical':
+            if row.get('delay_reason'):
+                # Changes color to red if critical, teal/orange if just a warning
+                border_color = "var(--danger)" if row.get('alert_level') == 'critical' else "var(--teal-mid)"
+                text_color = "var(--danger)" if row.get('alert_level') == 'critical' else "var(--teal-dark)"
+                
                 reason_html = textwrap.dedent(f"""
-                <div class="reason-box">
-                    <strong style="color:var(--danger);">🚩 AI Anomaly Detected:</strong><br>
-                    {row['anomaly_reason']}. Temperature at {row.get('temperature')}°C.
+                <div class="reason-box" style="border-left: 5px solid {border_color};">
+                    <strong style="color:{text_color};">⚠️ ETA Delay Insight:</strong><br>
+                    <span style="color:var(--text-muted); font-size: 0.95rem;">{row['delay_reason']}</span>
                 </div>
                 """).strip()
 
             card_html = textwrap.dedent(f"""
             <div class="dashboard-card">
                 <div style="margin-bottom:1rem;"><small style="color:var(--text-muted) !important;">{row.get('source', 'N/A')} → {row.get('destination', 'N/A')}</small></div>
-                <div style="display:flex; justify-content:space-between; margin-bottom:1rem;"><span>Status</span><span class="badge {badge}">{row.get('alert_level', 'N/A')}</span></div>
+                <div style="display:flex; justify-content:space-between; margin-bottom:1rem;"><span>Status</span><span class="badge {badge}">{row.get('alert_level', 'N/A').replace('_', ' ')}</span></div>
                 <div style="display:flex; justify-content:space-between; margin-bottom:1rem;"><span>Cargo Temp</span><span style="font-weight:800; font-size:1.2rem; color:{temp_color} !important;">{row.get('temperature', 'N/A')}°C</span></div>
                 <div style="display:flex; justify-content:space-between; margin-bottom:1rem;"><span>ETA Prediction</span><span style="font-weight:700;">{row.get('predicted_eta', 'N/A')} mins</span></div>
                 {reason_html}
@@ -208,6 +233,7 @@ with tab_map:
             """).strip()
             
             st.markdown(card_html, unsafe_allow_html=True)
+
 
 # ==========================================
 # TAB 2: RAG CHATBOT (MEMBER 4)
