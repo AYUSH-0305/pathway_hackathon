@@ -4,82 +4,68 @@ import psycopg2
 import os
 from datetime import datetime
 import numpy as np
+import threading
 
 class RealisticGPSSimulator:
     def __init__(self, shipment_id, route_points, vehicle_id):
-        """
-        route_points: List of (lat, lon) waypoints along the route
-        """
         self.shipment_id = shipment_id
         self.route_points = route_points
         self.vehicle_id = vehicle_id
         self.current_segment = 0
         self.segment_progress = 0.0
-        
-        # Vehicle state
         self.speed = 0
         self.is_stopped = False
         self.delay_remaining = 0
-        
+
     def simulate_traffic_conditions(self):
-        """Simulate realistic traffic patterns"""
         hour = datetime.now().hour
-        
-        # Rush hour slowdowns (7-10 AM, 5-8 PM)
         if 7 <= hour <= 10 or 17 <= hour <= 20:
-            return random.uniform(0.5, 0.8)  # 50-80% speed
-        
-        # Night time (faster)
+            return random.uniform(0.5, 0.8)
         if hour < 6 or hour > 22:
-            return random.uniform(1.0, 1.2)  # 100-120% speed
-        
-        return 1.0  # Normal
-    
+            return random.uniform(1.0, 1.2)
+        return 1.0
+
     def get_next_position(self):
-        """Get next position along route"""
         if self.current_segment >= len(self.route_points) - 1:
-            return None  # Journey complete
-        
-        # Random events
-        if random.random() < 0.05:  # 5% chance of stop
+            # Loop back to start for continuous demo
+            self.current_segment = 0
+            self.segment_progress = 0.0
+
+        if random.random() < 0.05:
             self.is_stopped = True
-            self.delay_remaining = random.randint(5, 15)  # 5-15 seconds
+            self.delay_remaining = random.randint(5, 15)
             self.speed = 0
-            
+
         if self.is_stopped:
             self.delay_remaining -= 1
             if self.delay_remaining <= 0:
                 self.is_stopped = False
-        
-        # Calculate position
+
         p1 = self.route_points[self.current_segment]
         p2 = self.route_points[self.current_segment + 1]
-        
-        # Interpolate
+
         lat = p1[0] + (p2[0] - p1[0]) * self.segment_progress
         lon = p1[1] + (p2[1] - p1[1]) * self.segment_progress
-        
-        # Add GPS noise
-        lat += random.gauss(0, 0.0001)  # ~11m accuracy
+
+        lat += random.gauss(0, 0.0001)
         lon += random.gauss(0, 0.0001)
-        
-        # Update progress
+
         if not self.is_stopped:
             traffic_factor = self.simulate_traffic_conditions()
             speed_variation = random.uniform(0.9, 1.1)
-            self.speed = 60 * traffic_factor * speed_variation  # Base 60 km/h
-            
+            self.speed = 60 * traffic_factor * speed_variation
+
             step = random.uniform(0.02, 0.05)
             self.segment_progress += step
-            
+
             if self.segment_progress >= 1.0:
                 self.current_segment += 1
                 self.segment_progress = 0.0
-        
+
         return (lat, lon, self.speed)
 
 
-# Realistic routes (waypoints)
+# Routes with exact waypoints matching the frontend map
 ROUTES = {
     ("Mumbai", "Delhi"): [
         (19.0760, 72.8777),  # Mumbai
@@ -96,65 +82,124 @@ ROUTES = {
 }
 
 
-def run_realistic_simulation(shipment_id, origin, destination, vehicle_id):
-    """Run realistic GPS simulation"""
-    route = ROUTES.get((origin, destination))
-    if not route:
-        print(f"❌ No route defined for {origin} → {destination}")
-        return
-    
-    sim = RealisticGPSSimulator(shipment_id, route, vehicle_id)
-    
-    print(f"\n🚛 {shipment_id}: {origin} → {destination}")
-    print("=" * 60)
-    
-    while True:
-        result = sim.get_next_position()
-        if result is None:
-            break
-        
-        lat, lon, speed = result
-        load_status = "LOADED" if speed > 0 else "PARTIAL"
-        
-        # Insert to database
-        insert_telemetry(shipment_id, vehicle_id, lat, lon, speed, load_status)
-        
-        time.sleep(2)  # Update every 2 seconds
-    
-    print(f"✅ {shipment_id} completed!")
+def get_db_connection():
+    db_url = os.getenv(
+        "DATABASE_URL",
+        "postgresql://supply_chain_user:supply_chain_pass@postgres:5432/supply_chain_db"
+    )
+    return psycopg2.connect(db_url)
+
+
+def ensure_shipments_exist():
+    """Make sure SH001 and SH002 exist in shipments table"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO shipments (shipment_id, vehicle_id, source, destination, status, last_updated)
+            VALUES
+                ('SH001', 'VH001', 'Mumbai', 'Delhi', 'IN_TRANSIT', NOW()),
+                ('SH002', 'VH002', 'Bangalore', 'Chennai', 'IN_TRANSIT', NOW())
+            ON CONFLICT (shipment_id) DO UPDATE
+                SET status = 'IN_TRANSIT', last_updated = NOW();
+        """)
+        conn.commit()
+        conn.close()
+        print("✅ Shipments SH001 and SH002 ready in DB")
+    except Exception as e:
+        print(f"⚠️  Could not ensure shipments: {e}")
 
 
 def insert_telemetry(shipment_id, vehicle_id, lat, lon, speed, load_status):
-    """Insert GPS data into PostgreSQL"""
     try:
-        # Use environment variable for database connection
-        db_url = os.getenv("DATABASE_URL", "postgresql://supply_chain_user:supply_chain_pass@postgres:5432/supply_chain_db")
-        
-        conn = psycopg2.connect(db_url)
+        conn = get_db_connection()
         cur = conn.cursor()
-        
+
+        # Insert telemetry
         cur.execute("""
             INSERT INTO telemetry (shipment_id, vehicle_id, ts, lat, lon, speed_kmph, load_status)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         """, (shipment_id, vehicle_id, datetime.now(), lat, lon, speed, load_status))
-        
+
+        # Update shipment last_updated and current position
+        cur.execute("""
+            UPDATE shipments
+            SET last_updated = NOW(), status = 'IN_TRANSIT'
+            WHERE shipment_id = %s
+        """, (shipment_id,))
+
         conn.commit()
         conn.close()
-        
-        status_icon = "🟢" if speed > 40 else "🟡" if speed > 0 else "🔴"
-        print(f"{status_icon} {shipment_id}: ({lat:.4f}, {lon:.4f}) @ {speed:.1f} km/h")
-        
+
+        icon = "🟢" if speed > 40 else "🟡" if speed > 0 else "🔴"
+        print(f"{icon} [{shipment_id}] ({lat:.4f}, {lon:.4f}) @ {speed:.1f} km/h | {load_status}")
+
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"❌ DB Error [{shipment_id}]: {e}")
+
+
+def run_simulation(shipment_id, origin, destination, vehicle_id):
+    """Run a single shipment simulation in a loop"""
+    route = ROUTES.get((origin, destination))
+    if not route:
+        print(f"❌ No route for {origin} → {destination}")
+        return
+
+    sim = RealisticGPSSimulator(shipment_id, route, vehicle_id)
+    print(f"\n🚛 Starting {shipment_id}: {origin} → {destination}")
+
+    while True:
+        result = sim.get_next_position()
+        if result is None:
+            print(f"✅ {shipment_id} completed route, restarting...")
+            sim.current_segment = 0
+            sim.segment_progress = 0.0
+            continue
+
+        lat, lon, speed = result
+        load_status = "LOADED" if speed > 0 else "PARTIAL"
+        insert_telemetry(shipment_id, vehicle_id, lat, lon, speed, load_status)
+        time.sleep(2)
 
 
 if __name__ == "__main__":
-    # Run both shipments in parallel (simplified - run one at a time for demo)
-    print("\n🚀 Starting GPS Simulator for all shipments...")
+    print("\n🚀 Starting GPS Simulator — Both Shipments in Parallel")
     print("=" * 60)
-    
-    # Simulate SH001: Mumbai → Delhi
-    run_realistic_simulation("SH001", "Mumbai", "Delhi", "VH001")
-    
-    # Simulate SH002: Bangalore → Chennai
-    # run_realistic_simulation("SH002", "Bangalore", "Chennai", "VH002")
+
+    # Wait for DB to be ready
+    print("⏳ Waiting for database...")
+    for attempt in range(10):
+        try:
+            conn = get_db_connection()
+            conn.close()
+            print("✅ Database connected!")
+            break
+        except Exception:
+            print(f"   Attempt {attempt + 1}/10 — retrying in 3s...")
+            time.sleep(3)
+
+    ensure_shipments_exist()
+
+    # Run BOTH shipments in parallel threads
+    t1 = threading.Thread(
+        target=run_simulation,
+        args=("SH001", "Mumbai", "Delhi", "VH001"),
+        daemon=True
+    )
+    t2 = threading.Thread(
+        target=run_simulation,
+        args=("SH002", "Bangalore", "Chennai", "VH002"),
+        daemon=True
+    )
+
+    t1.start()
+    time.sleep(1)  # Stagger starts slightly
+    t2.start()
+
+    print("\n✅ Both simulators running! Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n🛑 Simulator stopped.")

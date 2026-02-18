@@ -11,9 +11,22 @@ from datetime import datetime
 import psycopg2
 import psycopg2.extras
 import os
+import socketio
+from groq import Groq
+
 
 # Database connection
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://supply_chain_user:supply_chain_pass@postgres:5432/supply_chain_db")
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if not GROQ_API_KEY:
+    raise ValueError("GROQ_API_KEY environment variable not set")
+
+client = Groq(api_key=GROQ_API_KEY)
+
+SYSTEM_PROMPT = """You are a helpful supply chain logistics assistant. 
+Answer questions about shipments, routes, vehicles, and delivery status based on the provided data.
+Be concise and accurate."""
 
 app = FastAPI(
     title="Supply Chain Tracker API",
@@ -29,7 +42,36 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+socket_app = socketio.ASGIApp(sio, app)
 
+# Socket events
+@sio.event
+async def connect(sid, environ):
+    print(f"Client connected: {sid}")
+
+@sio.event  
+async def disconnect(sid):
+    print(f"Client disconnected: {sid}")
+
+# Function to broadcast telemetry (call from your GPS route handlers)
+async def broadcast_telemetry(data: dict):
+    await sio.emit('telemetry_update', data)
+
+async def broadcast_alert(alert: dict):
+    await sio.emit('new_alert', alert)
+
+
+
+
+class ChatRequest(BaseModel):
+    query: str
+    context: str | None = None
+    session_id: str | None = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: list[str] = []
 # Pydantic Models
 class ShipmentResponse(BaseModel):
     shipment_id: str
@@ -321,6 +363,48 @@ def get_statistics():
         "total_telemetry_records": total_telemetry,
         "timestamp": datetime.now().isoformat()
     }
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest):
+    """Main chat endpoint"""
+    try:
+        # Build context from database
+        shipments_data = get_shipments_context()
+        telemetry_data = get_latest_telemetry()
+        
+        # Add user-provided context if any
+        additional_context = f"\n\n{request.context}" if request.context else ""
+        
+        full_context = f"""
+{SYSTEM_PROMPT}
+
+Database Context:
+{shipments_data}
+
+{telemetry_data}
+{additional_context}
+
+User Question: {request.query}
+
+Provide a helpful, accurate answer based on the context above.
+"""
+        
+        # Call Groq
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": full_context}],
+            temperature=0.3,
+            max_tokens=500,
+        )
+        
+        answer = response.choices[0].message.content
+        
+        return ChatResponse(
+            answer=answer,
+            sources=["shipments_table", "telemetry_table"]
+        )
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn
