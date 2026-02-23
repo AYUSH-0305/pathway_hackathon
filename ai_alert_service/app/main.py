@@ -3,8 +3,23 @@ from .db import get_conn
 from .models import StallCheckRequest, DriverSafetyReport
 from .stall_detector import check_shipment_stall
 from .driver_alerts import create_driver_alert
-
+from fastapi import HTTPException
+import traceback
+from .db import get_conn
 app = FastAPI(title="AI Alert Service")
+@app.get("/health/db")
+def health_db():
+    try:
+        conn = get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1;")
+            v = cur.fetchone()[0]
+        conn.close()
+        return {"db": "ok", "value": v}
+    except Exception:
+        raise HTTPException(status_code=500, detail=traceback.format_exc())
+
+
 
 @app.post("/alerts/check-stall")
 def check_stall(req: StallCheckRequest):

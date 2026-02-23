@@ -131,6 +131,31 @@ services:
     networks:
       - supply-chain-network
     restart: unless-stopped
+  # AI Alert Microservice (New)
+  ai-alert-service:
+    build:
+      context: ./ai_alert_service
+      dockerfile: Dockerfile
+    container_name: ai_alert_service
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: supply_chain_db
+      DB_USER: supply_chain_user
+      DB_PASS: supply_chain_pass
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./ai_alert_service:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8100 --reload
+    networks:
+      - supply-chain-network
+    restart: unless-stopped  
+  
 
   
 
@@ -140,4 +165,7 @@ networks:
 
 volumes:
   postgres_data:
+
+
+   
   
