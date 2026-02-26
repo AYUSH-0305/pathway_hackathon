@@ -83,10 +83,7 @@ services:
       - supply-chain-network
     restart: unless-stopped
 
-  # Member 3: Dashboard
-  
-
-  # Member 4: GenAI Chatbot
+  # Member 4: GenAI RAG Chatbot API
   chatbot:
     build:
       context: ./genai_rag
