@@ -99,3 +99,10 @@ site/
 
 # Deprecated/unused folders
 dashboard/                    # Old Streamlit dashboard (replaced by supply-chain-dashboard/)
+npm-cache/                    # Temporary npm cache
+site-packages/                # Python packages (should be in venv)
+
+# Root-level node files (React dashboard has its own in supply-chain-dashboard/)
+/node_modules/
+/package.json
+/package-lock.json
