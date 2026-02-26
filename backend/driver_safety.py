@@ -42,7 +42,7 @@ def connect_websocket():
 def get_db_connection():
     db_url = os.getenv(
         "DATABASE_URL",
-        "postgresql://supply_chain_user:supply_chain_pass@localhost:5432/supply_chain_db"
+        "postgresql://supply_chain_user:supply_chain_pass@postgres:5432/supply_chain_db"
     )
     return psycopg2.connect(db_url)
 
