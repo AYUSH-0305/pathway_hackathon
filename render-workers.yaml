@@ -1,0 +1,28 @@
+services:
+  # GPS Simulator (as web service to avoid worker limitation)
+  - type: web
+    name: gps-simulator
+    env: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    dockerCommand: python gps_simulator_web.py
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+    healthCheckPath: /health
+
+  # Pathway Pipeline (as web service)
+  - type: web
+    name: pathway-pipeline
+    env: docker
+    dockerfilePath: ./pathway_pipeline/Dockerfile
+    dockerContext: ./pathway_pipeline
+    dockerCommand: python pipeline_web.py
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    healthCheckPath: /health
