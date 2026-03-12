@@ -31,5 +31,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy app code
 COPY . .
 
+# Create required directories
+RUN mkdir -p /app/data /app/outputs
+
 # Default command (will be overridden by docker-compose)
 CMD ["python", "main.py"]
