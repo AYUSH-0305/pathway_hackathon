@@ -41,7 +41,7 @@ services:
   - type: web
     name: ai-alert-service
     env: docker
-    dockerfilePath: ./ai_alert_service/dockerfile
+    dockerfilePath: ./ai_alert_service/Dockerfile
     dockerContext: ./ai_alert_service
     plan: free
     envVars:
